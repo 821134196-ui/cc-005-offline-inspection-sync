@@ -1,0 +1,83 @@
+name: inspection
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: inspection
+      POSTGRES_PASSWORD: inspection
+      POSTGRES_DB: inspection
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inspection -d inspection"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2024-09-13T20-26-02Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - miniodata:/data
+    ports:
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # One-shot bucket bootstrap; exits 0 once the bucket exists.
+  minio-init:
+    image: minio/mc:RELEASE.2024-08-17T20-43-51Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc mb --ignore-existing local/inspection &&
+      echo 'bucket inspection ready'"
+
+  backend:
+    build:
+      context: ./backend
+    environment:
+      DATABASE_URL: postgres://inspection:inspection@postgres:5432/inspection?sslmode=disable
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: inspection
+      MINIO_USE_SSL: "false"
+      JWT_SECRET: change-me-in-production
+      CHUNK_SIZE: "6291456"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    depends_on:
+      backend:
+        condition: service_started
+    ports:
+      - "8000:80"
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  miniodata:
